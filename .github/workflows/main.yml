@@ -2,13 +2,14 @@ name: Build APK
 on: [push, workflow_dispatch]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    container:
+      image: kivy/buildozer:latest
+      options: --user root
     steps:
       - uses: actions/checkout@v4
-      - uses: ArtemSBulgakov/buildozer-action@v1
-        with:
-          workdir: .
-          buildozer_version: stable
+      - name: Build with Buildozer
+        run: buildozer -v android debug
       - uses: actions/upload-artifact@v4
         with:
           name: arena-shooter-apk
