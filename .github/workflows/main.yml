@@ -14,8 +14,7 @@ jobs:
           pip3 install --upgrade buildozer==1.5.0 cython==0.29.36 setuptools wheel
 
       - name: Build APK
-        run: |
-          yes | buildozer -v android debug > build.log 2>&1 || (grep -i -E "error:|failed|exception" build.log | tail -n 25 && exit 1)
+        run: buildozer -v android debug
 
       - uses: actions/upload-artifact@v4
         with:
