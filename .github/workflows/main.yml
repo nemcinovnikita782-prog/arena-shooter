@@ -23,10 +23,13 @@ jobs:
           source.dir = .
           source.include_exts = py,png,jpg,kv,atlas
           version = 0.1
-          requirements = python3,kivy
+          requirements = python3,kivy==2.3.0
           orientation = portrait
           fullscreen = 0
           android.permissions = INTERNET
+          android.api = 33
+          android.minapi = 21
+          android.ndk = 25b
           android.archs = arm64-v8a
           android.accept_sdk_license = True
 
@@ -36,9 +39,17 @@ jobs:
           EOF
 
       - name: Build APK
-        run: buildozer -v android debug
+        run: buildozer -v android debug > build.log 2>&1 || (grep -B 25 "Command failed:" build.log || tail -n 50 build.log; exit 1)
+
+      - name: Upload Error Log if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-log
+          path: build.log
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: arena-shooter-apk
