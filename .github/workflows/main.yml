@@ -5,7 +5,6 @@ env:
   BUILDOZER_WARN_ON_ROOT: 0
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-  CFLAGS: "-Wno-error=incompatible-function-pointer-types -Wno-error=implicit-function-declaration"
 
 jobs:
   build:
