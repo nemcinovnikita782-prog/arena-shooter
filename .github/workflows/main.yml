@@ -5,6 +5,7 @@ env:
   BUILDOZER_WARN_ON_ROOT: 0
   ANDROID_HOME: /usr/local/lib/android/sdk
   ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  CFLAGS: "-Wno-error=incompatible-function-pointer-types -Wno-error=implicit-function-declaration"
 
 jobs:
   build:
@@ -12,10 +13,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache Buildozer directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
       - name: Install system packages and Java 11
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip build-essential git python3 python3-dev openjdk-11-jdk autoconf automake libtool pkg-config libffi-dev libssl-dev unzip zip zlib1g-dev libncurses5 libstdc++6
+          sudo apt-get install -y python3-pip build-essential git python3 python3-dev openjdk-11-jdk autoconf automake libtool pkg-config libffi-dev libssl-dev unzip zip zlib1g-dev libncurses5 libstdc++6 libsqlite3-dev
           sudo update-alternatives --set java /usr/lib/jvm/java-11-openjdk-amd64/bin/java
 
       - name: Setup Android SDK build-tools 33.0.2 and licenses
@@ -30,7 +41,6 @@ jobs:
 
       - name: Generate clean buildozer.spec
         run: |
-          rm -rf .buildozer bin build.log
           cat << 'EOF' > buildozer.spec
           [app]
           title = Arena Shooter
@@ -58,7 +68,7 @@ jobs:
 
       - name: Build APK
         run: |
-          buildozer -v android debug > build.log 2>&1 || (tail -n 60 build.log && exit 1)
+          yes | buildozer -v android debug > build.log 2>&1 || (grep -B 25 "Command failed:" build.log || tail -n 50 build.log; exit 1)
 
       - name: Upload Error Log if failed
         if: failure()
