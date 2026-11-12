@@ -1,0 +1,15 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ArtemSBulgakov/buildozer-action@v1
+        with:
+          workdir: .
+          buildozer_version: stable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arena-shooter-apk
+          path: bin/*.apk
