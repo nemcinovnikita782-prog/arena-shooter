@@ -68,6 +68,19 @@ def save_profile(data):
     except Exception:
         pass
 
+
+class ArenaCanvas(Widget):
+    def __init__(self, game, **kwargs):
+        super().__init__(**kwargs)
+        self.game = game
+        self.move_touch_id = None
+        self.shoot_touch_id = None
+        self.move_knob = (0, 0)
+        self.shoot_knob = (0, 0)
+        self.aim_dir = (0, 0)
+        self.manual_aim_active = False
+        self.bind(pos=self.redraw, size=self.redraw)
+
     def get_joy_centers(self):
         ctrl = self.game.profile["controls"]
         mx = self.x + self.width * ctrl["move_rx"]
@@ -153,7 +166,7 @@ def save_profile(data):
             self.game.set_manual_aim(False, 0, 0)
         return True
 
-    def redraw(self):
+    def redraw(self, *args):
         self.canvas.clear()
         st = self.game.state
         ox, oy = self.x, self.y
