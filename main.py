@@ -693,7 +693,8 @@ class ShooterApp(App):
 
         self.code_badge = Label(
             text="",
-            size_hint=(1, 0.05 if show_room_code else 0.0),
+            size_hint=(1, None),
+            height="28dp" if show_room_code else "1dp",
             opacity=1.0 if show_room_code else 0.0,
             bold=True,
             font_size="15sp",
@@ -701,30 +702,29 @@ class ShooterApp(App):
         )
         self.root_box.add_widget(self.code_badge)
 
-        self.arena_wrap = FloatLayout(size_hint=(1, 0.71 if show_room_code else 0.76))
+        self.arena_wrap = FloatLayout(size_hint=(1, 1))
         self.arena = ArenaCanvas(self, size_hint=(1, 1), pos_hint={"x": 0, "y": 0})
         self.arena_wrap.add_widget(self.arena)
 
         self.center_banner = Label(
             text="",
-            font_size="28sp",
+            font_size="26sp",
             bold=True,
             color=(0, 1, 0.53, 1),
-            size_hint=(0.8, 0.25),
+            size_hint=(0.85, 0.25),
             pos_hint={"center_x": 0.5, "center_y": 0.58}
         )
         self.arena_wrap.add_widget(self.center_banner)
         self.root_box.add_widget(self.arena_wrap)
 
-        self.bottom_box = BoxLayout(orientation="vertical", size_hint=(1, 0.12), padding=6, spacing=6)
+        self.bottom_box = BoxLayout(orientation="vertical", size_hint=(1, None), height="68dp", padding=6, spacing=6)
         self.root_box.add_widget(self.bottom_box)
 
     def hide_room_code_badge(self):
         if hasattr(self, "code_badge"):
             self.code_badge.text = ""
             self.code_badge.opacity = 0.0
-            self.code_badge.size_hint = (1, 0.0)
-            self.arena_wrap.size_hint = (1, 0.80)
+            self.code_badge.height = "1dp"
 
     def toggle_pause(self, instance):
         if self.net["role"] != "solo" or not self.match_active or self.state["game_over"]:
