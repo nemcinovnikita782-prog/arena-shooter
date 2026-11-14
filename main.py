@@ -13,6 +13,7 @@ import json
 import random
 import math
 import os
+import time
 
 SAVE_FILE = "arena_shooter_profile.json"
 UDP_PORT = 5556
@@ -67,6 +68,110 @@ def save_profile(data):
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def only_digits_and_dots(substring, from_undo):
+    """Поле ввода: разрешаем только цифры и точки (код комнаты или IP-адрес)."""
+    return "".join(ch for ch in substring if ch.isdigit() or ch == ".")
+
+
+def is_ip_address(text):
+    parts = text.strip().split(".")
+    if len(parts) != 4:
+        return False
+    for p in parts:
+        if not p.isdigit() or int(p) > 255:
+            return False
+    return True
+
+
+def describe_net_error(e):
+    """Понятное объяснение сетевой ошибки для экрана."""
+    text = str(e)
+    low = text.lower()
+    if isinstance(e, socket.timeout):
+        return "нет ответа (проверь, что вы в одной сети)"
+    if isinstance(e, ConnectionRefusedError):
+        return "хост не принимает подключения (комната создана?)"
+    if isinstance(e, PermissionError) or "denied" in low:
+        return text + ". Проверь разрешение INTERNET в buildozer.spec"
+    if "unreachable" in low:
+        return "сеть недоступна (включи Wi-Fi или точку доступа)"
+    return text
+
+
+def _interfaces_via_jnius():
+    """Сетевые интерфейсы телефона с их адресами (только Android, через pyjnius)."""
+    result = []
+    try:
+        from jnius import autoclass
+        NetworkInterface = autoclass("java.net.NetworkInterface")
+        ifs = NetworkInterface.getNetworkInterfaces()
+        while ifs is not None and ifs.hasMoreElements():
+            ni = ifs.nextElement()
+            try:
+                if ni.isLoopback() or not ni.isUp():
+                    continue
+                addrs = ni.getInterfaceAddresses()
+                for i in range(addrs.size()):
+                    ia = addrs.get(i)
+                    ip = str(ia.getAddress().getHostAddress())
+                    if ":" in ip:
+                        continue
+                    b = ia.getBroadcast()
+                    result.append({
+                        "name": str(ni.getName()),
+                        "ip": ip,
+                        "bcast": str(b.getHostAddress()) if b is not None else None
+                    })
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return result
+
+
+def _ips_via_route_lookup():
+    """Запасной способ узнать свой IP: спрашиваем у системы маршрут (пакеты не отправляются)."""
+    ips = []
+    for target in ("8.8.8.8", "192.168.43.1", "192.168.0.1", "192.168.1.1", "10.0.0.1"):
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((target, 9))
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127.") and ip != "0.0.0.0" and ip not in ips:
+                ips.append(ip)
+        except Exception:
+            pass
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+    return ips
+
+
+def get_network_info():
+    """Возвращает (ips, broadcasts): наши адреса в локальной сети и адреса для рассылки."""
+    ips, bcasts = [], []
+    for it in _interfaces_via_jnius():
+        if it["bcast"]:
+            if it["ip"] not in ips:
+                ips.append(it["ip"])
+            if it["bcast"] not in bcasts:
+                bcasts.append(it["bcast"])
+    if not bcasts:
+        for ip in _ips_via_route_lookup():
+            if ip not in ips:
+                ips.append(ip)
+            b = ".".join(ip.split(".")[:3] + ["255"])
+            if b not in bcasts:
+                bcasts.append(b)
+    if "255.255.255.255" not in bcasts:
+        bcasts.append("255.255.255.255")
+    return ips, bcasts
 
 
 class ArenaCanvas(Widget):
@@ -339,7 +444,10 @@ class ShooterApp(App):
             "conn": None,
             "running": False,
             "room_code": "",
-            "my_slot": 0
+            "my_slot": 0,
+            "mlock": None,
+            "joining": False,
+            "join_id": 0
         }
         self.difficulty = "classic"
         self.match_active = False
@@ -715,6 +823,19 @@ class ShooterApp(App):
         )
         self.root_box.add_widget(self.code_badge)
 
+        self.info_lbl = Label(
+            text="",
+            size_hint=(1, None),
+            height="48dp" if show_room_code else "1dp",
+            opacity=1.0 if show_room_code else 0.0,
+            font_size="12sp",
+            halign="center",
+            valign="middle",
+            color=(0.75, 0.8, 0.88, 1)
+        )
+        self.info_lbl.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+        self.root_box.add_widget(self.info_lbl)
+
         self.arena_wrap = FloatLayout(size_hint=(1, 1))
         self.arena = ArenaCanvas(self, size_hint=(1, 1), pos_hint={"x": 0, "y": 0})
         self.arena_wrap.add_widget(self.arena)
@@ -738,6 +859,10 @@ class ShooterApp(App):
             self.code_badge.text = ""
             self.code_badge.opacity = 0.0
             self.code_badge.height = "1dp"
+        if hasattr(self, "info_lbl"):
+            self.info_lbl.text = ""
+            self.info_lbl.opacity = 0.0
+            self.info_lbl.height = "1dp"
 
     def toggle_pause(self, instance):
         if self.net["role"] != "solo" or not self.match_active or self.state["game_over"]:
@@ -792,11 +917,11 @@ class ShooterApp(App):
 
         self.code_input = TextInput(
             text="",
-            hint_text="4-значный код комнаты",
+            hint_text="Код комнаты (4 цифры) или IP",
             multiline=False,
             halign="center",
             font_size="18sp",
-            input_filter="int"
+            input_filter=only_digits_and_dots
         )
         self.bottom_box.add_widget(self.code_input)
 
@@ -813,6 +938,9 @@ class ShooterApp(App):
         row.add_widget(btn_back)
         self.bottom_box.add_widget(row)
     def close_network(self):
+        self.net["join_id"] = self.net.get("join_id", 0) + 1
+        self.net["joining"] = False
+        self.release_multicast_lock()
         self.net["running"] = False
         self.net["udp_running"] = False
         if self.net["conn"]:
@@ -855,7 +983,54 @@ class ShooterApp(App):
             except Exception:
                 pass
 
+    def acquire_multicast_lock(self):
+        """Android иногда режет широковещательные пакеты: просим систему их пропускать."""
+        if self.net.get("mlock"):
+            return
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            Context = autoclass("android.content.Context")
+            wifi = PythonActivity.mActivity.getSystemService(Context.WIFI_SERVICE)
+            lock = wifi.createMulticastLock("arena_shooter")
+            lock.setReferenceCounted(False)
+            lock.acquire()
+            self.net["mlock"] = lock
+        except Exception:
+            pass
+
+    def release_multicast_lock(self):
+        lock = self.net.get("mlock")
+        self.net["mlock"] = None
+        if lock:
+            try:
+                lock.release()
+            except Exception:
+                pass
+
+    def set_info(self, text):
+        """Подсказка под кодом комнаты. Можно вызывать из любого потока."""
+        def _apply(dt):
+            if hasattr(self, "info_lbl"):
+                self.info_lbl.text = text
+        Clock.schedule_once(_apply, 0)
+
+    def net_fail(self, badge_text, info_text=""):
+        """Показываем, что пошло не так, и сбрасываем попытку подключения."""
+        def _apply(dt):
+            if self.net["role"] == "client":
+                self.net["role"] = None
+                self.release_multicast_lock()
+            if hasattr(self, "code_badge"):
+                self.code_badge.text = badge_text
+            if hasattr(self, "info_lbl"):
+                self.info_lbl.text = info_text
+        Clock.schedule_once(_apply, 0)
+
     def start_host(self, instance):
+        if self.net["role"] == "host" or self.net.get("joining"):
+            return
+        self.close_network()
         code = str(random.randint(1000, 9999))
         self.net["role"] = "host"
         self.net["my_slot"] = 0
@@ -863,7 +1038,10 @@ class ShooterApp(App):
         self.net["running"] = True
         self.net["udp_running"] = True
 
+        ips, _ = get_network_info()
+        ip_txt = ", ".join(ips) if ips else "не найден (включи Wi-Fi или точку доступа)"
         self.code_badge.text = f"КОД КОМНАТЫ: {code}  |  ИГРОКОВ: 1/5"
+        self.info_lbl.text = f"Если друг не видит комнату, пусть введёт вместо кода IP: {ip_txt}"
         self.center_banner.text = "ОЖИДАНИЕ ДРУЗЕЙ..."
         self.setup_ready_footer(is_solo=False)
 
@@ -871,31 +1049,48 @@ class ShooterApp(App):
         threading.Thread(target=self.tcp_host_worker, daemon=True).start()
 
     def udp_beacon_worker(self, code):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except Exception as e:
+            self.set_info("Ошибка сети (UDP): " + describe_net_error(e))
+            return
         msg = f"ARENA_ROOM:{code}".encode("utf-8")
-        while self.net["udp_running"] and not self.state["started"]:
-            try:
-                sock.sendto(msg, ("255.255.255.255", UDP_PORT))
-            except Exception:
-                pass
+        targets = []
+        tick = 0
+        while self.net["udp_running"] and self.net["room_code"] == code and not self.state["started"]:
+            if tick % 3 == 0:
+                _, targets = get_network_info()
+            tick += 1
+            for t in targets:
+                try:
+                    sock.sendto(msg, (t, UDP_PORT))
+                except Exception:
+                    pass
             threading.Event().wait(1.0)
         sock.close()
 
     def tcp_host_worker(self):
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.net["srv"] = srv
         try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             srv.bind(("0.0.0.0", TCP_PORT))
             srv.listen(4)
-        except Exception:
+        except Exception as e:
+            self.set_info("Не удалось открыть комнату: " + describe_net_error(e))
+            return
+        self.net["srv"] = srv
+        if not self.net["running"]:
+            srv.close()
             return
 
         while self.net["running"] and not self.state["started"]:
             try:
                 conn, addr = srv.accept()
-                free_slot = -1
+            except Exception:
+                break
+            free_slot, client_info = -1, None
+            try:
                 for i in range(1, 5):
                     if not self.state["players"][i]["active"]:
                         free_slot = i
@@ -912,7 +1107,15 @@ class ShooterApp(App):
                 Clock.schedule_once(lambda dt: self.update_lobby_counter(), 0)
                 threading.Thread(target=self.handle_client_conn, args=(client_info,), daemon=True).start()
             except Exception:
-                break
+                if client_info in self.net["clients"]:
+                    self.net["clients"].remove(client_info)
+                if free_slot != -1:
+                    self.state["players"][free_slot]["active"] = False
+                    self.state["players"][free_slot]["hp"] = 0
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def update_lobby_counter(self):
         cnt = sum(1 for p in self.state["players"] if p["active"])
@@ -950,70 +1153,122 @@ class ShooterApp(App):
         Clock.schedule_once(lambda dt: self.update_lobby_counter(), 0)
 
     def start_client_by_code(self, instance):
-        code = self.code_input.text.strip()
-        if len(code) != 4:
-            self.code_badge.text = "ВВЕДИ 4 ЦИФРЫ КОДА КОМНАТЫ!"
+        if self.net.get("joining") or self.net["role"] == "host":
             return
+        value = self.code_input.text.strip()
+        by_ip = is_ip_address(value)
+        if not by_ip and not (len(value) == 4 and value.isdigit()):
+            self.code_badge.text = "ВВЕДИ 4 ЦИФРЫ КОДА ИЛИ IP ХОСТА!"
+            return
+        self.net["join_id"] = self.net.get("join_id", 0) + 1
+        jid = self.net["join_id"]
+        self.net["joining"] = True
         self.net["role"] = "client"
-        self.code_badge.text = f"ПОИСК КОМНАТЫ {code}..."
-        threading.Thread(target=self.client_discover_and_connect, args=(code,), daemon=True).start()
+        self.acquire_multicast_lock()
+        self.code_badge.text = f"ПОДКЛЮЧЕНИЕ К {value}..." if by_ip else f"ПОИСК КОМНАТЫ {value}..."
+        self.info_lbl.text = ""
+        threading.Thread(target=self.client_discover_and_connect, args=(value, jid), daemon=True).start()
 
-    def client_discover_and_connect(self, target_code):
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        udp.settimeout(6.0)
-        host_ip = None
+    def discover_host(self, code, timeout=8.0):
+        """Ждём от хоста сообщение ARENA_ROOM:<код>. Возвращает (ip, текст_ошибки)."""
+        expected = f"ARENA_ROOM:{code}"
+        udp = None
         try:
-            udp.bind(("0.0.0.0", UDP_PORT))
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            udp.bind(("", UDP_PORT))
+            deadline = time.monotonic() + timeout
             while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None, None
+                udp.settimeout(left)
                 data, addr = udp.recvfrom(1024)
-                txt = data.decode("utf-8", errors="ignore")
-                if txt == f"ARENA_ROOM:{target_code}":
-                    host_ip = addr[0]
-                    break
-        except Exception:
-            pass
+                if data.decode("utf-8", errors="ignore").strip() == expected:
+                    return addr[0], None
+        except socket.timeout:
+            return None, None
+        except Exception as e:
+            return None, describe_net_error(e)
         finally:
-            udp.close()
+            if udp is not None:
+                try:
+                    udp.close()
+                except Exception:
+                    pass
 
-        if not host_ip:
-            Clock.schedule_once(lambda dt: setattr(self.code_badge, "text", "КОМНАТА НЕ НАЙДЕНА! ПРОВЕРЬ КОД"), 0)
-            return
-
-        cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    def client_discover_and_connect(self, target, jid):
         try:
-            cli.connect((host_ip, TCP_PORT))
-        except Exception:
-            Clock.schedule_once(lambda dt: setattr(self.code_badge, "text", "ОШИБКА ПОДКЛЮЧЕНИЯ К ХОСТУ"), 0)
-            return
+            if is_ip_address(target):
+                host_ip = target
+            else:
+                host_ip, err = self.discover_host(target)
+                if jid != self.net.get("join_id"):
+                    return
+                if not host_ip:
+                    if err:
+                        self.net_fail("ОШИБКА СЕТИ", err)
+                    else:
+                        self.net_fail(
+                            "КОМНАТА НЕ НАЙДЕНА!",
+                            "Проверь код. Телефоны должны быть в одной сети (Wi-Fi или точка доступа). "
+                            "Можно ввести IP хоста вместо кода."
+                        )
+                    return
 
-        self.net["conn"] = cli
-        self.net["running"] = True
-        self.send_to_host({"type": "nick", "nick": self.profile["nickname"]})
-        Clock.schedule_once(lambda dt: self.on_client_joined_lobby(target_code), 0)
-
-        buf = ""
-        while self.net["running"]:
+            cli = None
             try:
-                data = cli.recv(16384).decode("utf-8")
-                if not data:
+                cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                cli.settimeout(5.0)
+                cli.connect((host_ip, TCP_PORT))
+                cli.settimeout(None)
+            except Exception as e:
+                if cli is not None:
+                    try:
+                        cli.close()
+                    except Exception:
+                        pass
+                self.net_fail("ОШИБКА ПОДКЛЮЧЕНИЯ К ХОСТУ", f"{host_ip}: {describe_net_error(e)}")
+                return
+
+            if jid != self.net.get("join_id"):
+                cli.close()
+                return
+
+            self.net["conn"] = cli
+            self.net["running"] = True
+            self.send_to_host({"type": "nick", "nick": self.profile["nickname"]})
+            Clock.schedule_once(
+                lambda dt: self.on_client_joined_lobby(target) if jid == self.net.get("join_id") else None, 0
+            )
+
+            buf = ""
+            while self.net["running"]:
+                try:
+                    data = cli.recv(16384).decode("utf-8")
+                    if not data:
+                        break
+                    buf += data
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        msg = json.loads(line)
+                        if msg.get("type") == "welcome":
+                            self.net["my_slot"] = msg["slot"]
+                        elif msg.get("type") == "state":
+                            was_started = self.state.get("started", False)
+                            self.state.update(msg["data"])
+                            if (self.state["started"] or self.state["countdown"] > 0) and not was_started:
+                                Clock.schedule_once(lambda dt: self.on_client_match_started(), 0)
+                except Exception:
                     break
-                buf += data
-                while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
-                    msg = json.loads(line)
-                    if msg.get("type") == "welcome":
-                        self.net["my_slot"] = msg["slot"]
-                    elif msg.get("type") == "state":
-                        was_started = self.state.get("started", False)
-                        self.state.update(msg["data"])
-                        if (self.state["started"] or self.state["countdown"] > 0) and not was_started:
-                            Clock.schedule_once(lambda dt: self.on_client_match_started(), 0)
-            except Exception:
-                break
+        finally:
+            if jid == self.net.get("join_id"):
+                self.net["joining"] = False
 
     def on_client_joined_lobby(self, code):
+        self.release_multicast_lock()
         self.code_badge.text = f"ПОДКЛЮЧЕНО К КОМНАТЕ {code}"
+        self.info_lbl.text = ""
         self.center_banner.text = "НАЖМИ ГОТОВ!"
         self.setup_ready_footer(is_solo=False)
 
